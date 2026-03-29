@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assertSafeWindowsShellArgs, shouldUseShellForCommand } from "../../scripts/ui.js";
+import {
+  assertSafeWindowsShellArgs,
+  resolveRunner,
+  shouldUseShellForCommand,
+} from "../../scripts/ui.js";
 
 describe("scripts/ui windows spawn behavior", () => {
   it("enables shell for Windows command launchers that require cmd.exe", () => {
@@ -31,5 +35,37 @@ describe("scripts/ui windows spawn behavior", () => {
 
   it("does not reject args on non-windows platforms", () => {
     expect(() => assertSafeWindowsShellArgs(["contains&metacharacters"], "linux")).not.toThrow();
+  });
+});
+
+describe("scripts/ui runner resolution", () => {
+  it("prefers pnpm when it is available", () => {
+    const runner = resolveRunner((cmd) => {
+      if (cmd === "pnpm") {
+        return "/opt/bin/pnpm";
+      }
+      return null;
+    });
+
+    expect(runner).toEqual({ cmd: "/opt/bin/pnpm", args: [] });
+  });
+
+  it("falls back to corepack pnpm when pnpm is missing", () => {
+    const runner = resolveRunner((cmd) => {
+      if (cmd === "corepack") {
+        return "/opt/bin/corepack";
+      }
+      return null;
+    }, "/tmp/openclaw-corepack-test");
+
+    expect(runner).toMatchObject({
+      cmd: "/opt/bin/corepack",
+      args: ["pnpm"],
+      env: { COREPACK_HOME: "/tmp/openclaw-corepack-test" },
+    });
+  });
+
+  it("returns null when neither pnpm nor corepack is available", () => {
+    expect(resolveRunner(() => null)).toBeNull();
   });
 });

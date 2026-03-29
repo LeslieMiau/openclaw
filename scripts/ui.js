@@ -2,6 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,18 @@ const WINDOWS_UNSAFE_SHELL_ARG_PATTERN = /[\r\n"&|<>^%!]/;
 function usage() {
   // keep this tiny; it's invoked from npm scripts too
   process.stderr.write("Usage: node scripts/ui.js <install|dev|build|test> [...args]\n");
+}
+
+function defaultRunnerCacheRoot() {
+  return path.join(os.tmpdir(), "openclaw-ui-runner");
+}
+
+function defaultCorepackHome() {
+  return path.join(defaultRunnerCacheRoot(), "corepack");
+}
+
+function defaultNpmCacheHome() {
+  return path.join(defaultRunnerCacheRoot(), "npm");
 }
 
 function which(cmd) {
@@ -45,10 +58,24 @@ function which(cmd) {
   return null;
 }
 
-function resolveRunner() {
-  const pnpm = which("pnpm");
+export function resolveRunner(findExecutable = which, corepackHome) {
+  const pnpm = findExecutable("pnpm");
   if (pnpm) {
-    return { cmd: pnpm, kind: "pnpm" };
+    return { cmd: pnpm, args: [] };
+  }
+  const corepack = findExecutable("corepack");
+  if (corepack) {
+    const resolvedCorepackHome = corepackHome ?? process.env.COREPACK_HOME ?? defaultCorepackHome();
+    return {
+      cmd: corepack,
+      args: ["pnpm"],
+      // Corepack shells out to npm for some package fetches, so keep both
+      // caches writable when we have to synthesize pnpm.
+      env: {
+        COREPACK_HOME: resolvedCorepackHome,
+        npm_config_cache: process.env.npm_config_cache ?? defaultNpmCacheHome(),
+      },
+    };
   }
   return null;
 }
@@ -89,18 +116,37 @@ function createSpawnOptions(cmd, args, envOverride) {
   };
 }
 
-function run(cmd, args) {
+function mergeRunnerEnv(runner, envOverride) {
+  return {
+    ...process.env,
+    ...runner.env,
+    ...envOverride,
+  };
+}
+
+function uiInstallArgs() {
+  // Keep UI bootstrapping scoped to `ui/` so unrelated workspace packages do not
+  // run their install/prepare hooks during first-launch UI setup.
+  return ["install", "--ignore-workspace"];
+}
+
+function run(runner, args) {
+  const finalArgs = [...runner.args, ...args];
   let child;
   try {
-    child = spawn(cmd, args, createSpawnOptions(cmd, args));
+    child = spawn(
+      runner.cmd,
+      finalArgs,
+      createSpawnOptions(runner.cmd, finalArgs, mergeRunnerEnv(runner)),
+    );
   } catch (err) {
-    console.error(`Failed to launch ${cmd}:`, err);
+    console.error(`Failed to launch ${runner.cmd}:`, err);
     process.exit(1);
     return;
   }
 
   child.on("error", (err) => {
-    console.error(`Failed to launch ${cmd}:`, err);
+    console.error(`Failed to launch ${runner.cmd}:`, err);
     process.exit(1);
   });
   child.on("exit", (code) => {
@@ -110,12 +156,17 @@ function run(cmd, args) {
   });
 }
 
-function runSync(cmd, args, envOverride) {
+function runSync(runner, args, envOverride) {
+  const finalArgs = [...runner.args, ...args];
   let result;
   try {
-    result = spawnSync(cmd, args, createSpawnOptions(cmd, args, envOverride));
+    result = spawnSync(
+      runner.cmd,
+      finalArgs,
+      createSpawnOptions(runner.cmd, finalArgs, mergeRunnerEnv(runner, envOverride)),
+    );
   } catch (err) {
-    console.error(`Failed to launch ${cmd}:`, err);
+    console.error(`Failed to launch ${runner.cmd}:`, err);
     process.exit(1);
     return;
   }
@@ -168,7 +219,7 @@ export function main(argv = process.argv.slice(2)) {
 
   const runner = resolveRunner();
   if (!runner) {
-    process.stderr.write("Missing UI runner: install pnpm, then retry.\n");
+    process.stderr.write("Missing UI runner: install pnpm or enable Corepack, then retry.\n");
     process.exit(1);
   }
 
@@ -179,18 +230,15 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   if (action === "install") {
-    run(runner.cmd, ["install", ...rest]);
+    run(runner, [...uiInstallArgs(), ...rest]);
     return;
   }
 
   if (!depsInstalled(action === "test" ? "test" : "build")) {
-    const installEnv =
-      action === "build" ? { ...process.env, NODE_ENV: "production" } : process.env;
-    const installArgs = action === "build" ? ["install", "--prod"] : ["install"];
-    runSync(runner.cmd, installArgs, installEnv);
+    runSync(runner, uiInstallArgs(), process.env);
   }
 
-  run(runner.cmd, ["run", script, ...rest]);
+  run(runner, ["run", script, ...rest]);
 }
 
 const isDirectExecution = (() => {
