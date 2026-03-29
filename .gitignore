@@ -144,3 +144,6 @@ changelog/fragments/
 # Harness 临时文件
 PLAN.json
 PROGRESS.md
+
+# Local Python virtualenv
+.venv/
